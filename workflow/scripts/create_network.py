@@ -6,6 +6,7 @@ import pickle
 from collections import defaultdict
 import networkx as nx
 import logging
+from collections import namedtuple
 
 
 def read_mmseqs_cluster_tsv(filename):
@@ -62,7 +63,9 @@ def parse_merged_gff(fn: str):
                 contigs[contig].append(protein_id)
 
 
-def main(merged_gff, cluster_table, output_pickle_network):
+EdgeInfo = namedtuple('EdgeInfo', ['on_contig_position', 'assembly', 'contig'])
+
+def main(merged_gff, cluster_table, output_pickle_network, log_each=100):
 
     logger = logging.getLogger(Path(__file__).stem)
     logger.setLevel(logging.INFO)
@@ -106,32 +109,27 @@ def main(merged_gff, cluster_table, output_pickle_network):
         for contig, proteins in i[1].items():
 
             clusters = tuple(map(clusters_members.get, proteins))
-            
-            nodes.update((contig_nodes := set(filter(None, clusters))))
 
-            if len(contig_nodes) <= 1:
-                continue
+            removing_duplicates = tuple({cluster : None for cluster in clusters if cluster })
             
-            #  zip: get edges: (1, 2, 3, 4) -> (1, 2), (2, 3), (3, 4)
-            #  filter: some times is None so we filter out those
-            #  filter: because of fragmentation and duplication,
-            #          some times the same cluster is repeated
-            #          so we filter out those too. The information
-            #          not lost because: (1, 2, 2, 3) -> (1, 2), (2, 3)
-            #  map: we sort the tuple so direction doesn't matter
-            #  map: we convert the tuple to a tuple so it can be a set element
-            #  set: we convert the list to a set so we can filter out duplicates
-            contig_edges = set(map(tuple, map(sorted, filter(lambda x: x[0] != x[1], filter(all, zip(clusters, clusters[1:]))))))
+            nodes.update(removing_duplicates)
 
-            if len(contig_edges) < 1:
+            if len(removing_duplicates) <= 1:
                 continue
 
-            for edge in contig_edges:
-                edges[edge].add((assembly, contig))
+            get_edges = zip(removing_duplicates, removing_duplicates[1:])
+
+            sort_each_tuple = map(tuple, map(sorted, get_edges))
+
+            add_edge_position = map(lambda x: (*x[1], x[0]), enumerate(sort_each_tuple, start=1))
+
+            as_edge_namedtuple = map(lambda x: (x[:2], EdgeInfo(x[2], assembly, contig)), add_edge_position)
+
+            for edge_pos, edge_info in as_edge_namedtuple:
+                edges[edge_pos].add(edge_info)
                 
         number_of_processed_asssemblies += 1
-        # print counter every 100 assemblies
-        if number_of_processed_asssemblies % 100 == 0:
+        if number_of_processed_asssemblies % log_each == 0:
             logger.info(f'processed {number_of_processed_asssemblies} assemblies')
 
 
@@ -141,7 +139,7 @@ def main(merged_gff, cluster_table, output_pickle_network):
     logger.info('Creating networkx graph')
     G = nx.Graph()
     G.add_nodes_from(nodes)
-    G.add_edges_from(( *k, {'contigs' : tuple(v)}) for k, v in edges.items())
+    G.add_edges_from(( *k, {'info' : tuple(v)}) for k, v in edges.items())
     logger.info('Done creating networkx graph')
 
     logger.info(f'Saving network to {output_pickle_network}')

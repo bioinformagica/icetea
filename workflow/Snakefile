@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+
+from pathlib import Path
+
+
+RESULTS = Path(config['results_dir'])
+SCRIPTS = Path(config['scripts_dir'])
+CLUSTER_ASSIGNMENT_TABLE = config['cluster_assignment_table']
+ALL_CDS_INFO_TABLE = config['all_cds_info_table']
+SYSTEMS_FASTA = config['systems_fasta']
+OUTPUT_PREFIX = config.get('output_prefix', 'FREQ')
+
+WINDOW_SIZE = config.get('window_size', 5)
+
+MMSEQS2_REPS_DB = config['mmseqs2_reps_db']
+MMSEQS_SEARCH_TABLE_HEADER = "query,target,pident,alnlen,mismatch,gapopen,qstart,qend,tstart,tend,evalue,bits,qcov,tcov"
+MMSEQS_MIN_IDENTITY = config.get('mmseqs_min_identity', '0.3')
+MMSEQS_MIN_COVERAGE = config.get('mmseqs_min_coverage', '0.8')
+MMSEQS_COV_MODE = config.get('mmseqs_cov_mode', '0')
+
+def get_cores_percentage(percentage):
+    assert 0 <= percentage <= 1, f'percentage must be between 0 and 1, not {percentage}'
+    return max(1, workflow.cores * percentage)
+    
+
+rule all:
+    input:
+        simple_freq = RESULTS / f'{OUTPUT_PREFIX}.simple.freq.tsv',
+        colloc_freq = RESULTS / f'{OUTPUT_PREFIX}.colloc.freq.tsv',
+    
+
+rule get_freqs:
+    input:
+        script = SCRIPTS / 'get_freqs.py',
+        search_table = RESULTS / 'search_table.tsv',
+        system_info = RESULTS / 'system_info.tsv',
+        cds_info_only_positive_matches = RESULTS / 'cds_info_only_positive_matches.tsv',
+        total_assemblies = RESULTS / 'total_assemblies.tsv',
+    output:
+        simple_freq = RESULTS / f'{OUTPUT_PREFIX}.simple.freq.tsv',
+        colloc_freq = RESULTS / f'{OUTPUT_PREFIX}.colloc.freq.tsv',
+    params:
+        window_size = WINDOW_SIZE,
+    shell:
+        """
+        python3 {input.script} \
+            {input.search_table} \
+            {input.cds_info_only_positive_matches} \
+            {input.system_info} \
+            $( cat {input.total_assemblies} ) \
+            {params.window_size} \
+            {output.simple_freq} \
+            {output.colloc_freq}
+        """
+
+rule get_search_table:
+    input:
+        mmseqs2_reps_db = MMSEQS2_REPS_DB,
+        systems_fasta = SYSTEMS_FASTA,
+    output:
+        search_table = RESULTS / 'search_table.tsv',
+        mmseqs_tmp_dir = temp(directory(RESULTS / 'mmseqs_tmp')),
+    conda:
+        'mmseqs2_env'
+    params:
+        header = MMSEQS_SEARCH_TABLE_HEADER,
+        min_identity = MMSEQS_MIN_IDENTITY,
+        min_coverage = MMSEQS_MIN_COVERAGE,
+        cov_mode = MMSEQS_COV_MODE,
+    threads:
+        get_cores_percentage(1)
+    shell:
+        """
+        mmseqs easy-search \
+            {input.systems_fasta} \
+            {input.mmseqs2_reps_db} \
+            {output.search_table} \
+            {output.mmseqs_tmp_dir} \
+            --threads {threads} \
+            --format-output {params.header} \
+            --min-seq-id {params.min_identity} \
+            -c {params.min_coverage} \
+            --cov-mode {params.cov_mode}
+        """
+
+rule get_cluster_assignment_only_positive_matches:
+    input:
+        cluster_assignment_table = CLUSTER_ASSIGNMENT_TABLE,
+        search_table = RESULTS / 'search_table.tsv',
+    output:
+        cluster_assignment_only_positive_matches = RESULTS / 'cluster_assignment_only_positive_matches.tsv',
+    shell:
+        """
+        awk -F '\\t' '{{print $2}}' {input.search_table} | \
+            grep -Ff - {input.cluster_assignment_table} > {output.cluster_assignment_only_positive_matches}
+        """
+
+rule get_cds_info_only_positive_matches:
+    input:
+        cluster_assignment_only_positive_matches = RESULTS / 'cluster_assignment_only_positive_matches.tsv',
+        all_cds_info_table = ALL_CDS_INFO_TABLE,
+        script = SCRIPTS / 'get_cds_info_only_positive_matches.py',
+    output:
+        cds_info_only_positive_matches = RESULTS / 'cds_info_only_positive_matches.tsv',
+    shell:
+        """
+        python3 {input.script} \
+            {input.cluster_assignment_only_positive_matches} \
+            {input.all_cds_info_table} \
+            {output.cds_info_only_positive_matches}
+        """
+
+rule get_total_assemblies:
+    input:
+        all_cds_info_table = ALL_CDS_INFO_TABLE,
+    output:
+        total_assemblies = RESULTS / 'total_assemblies.tsv',
+    shell:
+        """
+        awk -F '\\t' '!d[$1]++' {input.all_cds_info_table} | \
+            wc -l > {output.total_assemblies}
+        """
+
+rule get_system_info:
+    input:
+        systems_fasta = SYSTEMS_FASTA,
+    output:
+        system_info = RESULTS / 'system_info.tsv',
+    shell:
+        """
+        awk -F '-' -v OFS='\\t' '/^>/ {{print substr($1, 2), $2}}'  {input.systems_fasta} > {output.system_info}
+        """
+
